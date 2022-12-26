@@ -1,6 +1,6 @@
 from __future__ import (absolute_import, division, print_function)
-__metaclass__ = type
 
+__metaclass__ = type
 
 DOCUMENTATION = r'''
 ---
@@ -39,20 +39,29 @@ options:
 '''
 
 EXAMPLES = r'''
-- name: example copying certificate with public key with owner and permissions
+- name: example copying certificate with key with owner and permissions
   copy_certificate:
     src: /srv/myfiles/foo.cer
-    dest: /etc/foo.cer
+    dest: /etc/
+    owner: foo
+    group: foo
+    mode: 0644
+    force: yes
+
+- name: example untaring archive with certificates and key and copying with owner and permissions
+  copy_certificate:
+    src: /srv/myfiles/foo.tar
+    dest: /etc/
     owner: foo
     group: foo
     mode: 0644
     force: yes
 '''
 
-
 import os
 import shutil
 from datetime import datetime
+import tarfile
 import tempfile
 import base64
 import OpenSSL
@@ -64,50 +73,97 @@ from ansible.module_utils.parsing.convert_bool import boolean
 from ansible.plugins.action import ActionBase
 
 
+def _deal_with_tar(src_cert):
+    """
+    Extract content of certificate and private key
+    :param src_cert: Path to tarball
+    :return:
+    """
+
+    try:
+        with tarfile.open(src_cert, 'r') as tar:
+            files = tar.getmembers()
+
+            for file in files:
+                if file.name == 'privkey.pem':
+                    key_content = tar.extractfile(file).read()
+                elif file.name == 'fullchain.pem':
+                    cert_content = tar.extractfile(file).read()
+
+            if cert_content is None:
+                raise AnsibleActionFail('Could not find fullchain.pem file in tar %s' % src_cert)
+            elif key_content is None:
+                raise AnsibleActionFail('Could not find privkey.pem file in tar %s' % src_cert)
+
+            return cert_content, key_content
+    except Exception as e:
+        raise AnsibleActionFail('Could not read tarball %s: %s' % (src_cert, str(e)))
+
+
+def _deal_with_plain(src_cert):
+    """
+    Find and return content of certificate and associated private key
+    :param src_cert: Path to certificate
+    :return:
+    """
+
+    src_key = src_cert.replace(os.path.splitext(src_cert)[1], '.key')
+
+    if not os.path.exists(src_key):
+        raise AnsibleActionFail("src key %s does not exist" % src_key)
+
+    try:
+        with open(to_bytes(src_key, errors='surrogate_or_struct'), 'rb') as f:
+            key_content = f.read()
+
+        with open(to_bytes(src_cert, errors='surrogate_or_struct'), 'rb') as f:
+            cert_content = f.read()
+    except (IOError, OSError) as e:
+        raise AnsibleActionFail("could not read src=%s, %s" % (src_cert, to_text(e)))
+
+    return cert_content, key_content
+
+
 class ActionModule(ActionBase):
 
     def run(self, tmp=None, task_vars=None):
-        ''' handler for file transfer operations '''
+        """ handler for file transfer operations """
 
         if task_vars is None:
             task_vars = dict()
 
-        result   = super(ActionModule, self).run(tmp, task_vars)
-        del tmp # tmp no longer has any effect
+        result = super(ActionModule, self).run(tmp, task_vars)
+        del tmp  # tmp no longer has any effect
 
-        src_cert  = self._task.args.get('src', None)
+        src_cert = self._task.args.get('src', None)
         dest_cert = self._task.args.get('dest', None)
         force = boolean(self._task.args.get('force', False), strict=False)
 
-        src_cert = self._connection._shell.join_path(src_cert);
-        src_key = src_cert.replace('.cer', '.key')
+        src_cert = self._connection._shell.join_path(src_cert)
+        src_ext = os.path.splitext(src_cert)[1]
+        # src_key = src_cert.replace('.cer', '.key')
 
         try:
             if src_cert is None or dest_cert is None:
                 raise AnsibleActionFail("src and dest are required")
 
             if not os.path.exists(src_cert):
-                raise AnsibleActionFail("src certificate %s does not exist" % src_cert)
+                raise AnsibleActionFail("src %s does not exist" % src_cert)
 
-            if not os.path.exists(src_key):
-                raise AnsibleActionFail("src public key %s does not exist" % src_key)
-
-            src_content = None
-            try:
-                with open(to_bytes(src_cert, errors='surrogate_or_struct'), 'rb') as f:
-                    src_content = f.read()
-            except (IOError, OSError) as e:
-                raise AnsibleActionFail("could not read src=%s, %s" % (src_cert, to_text(e)))
+            if src_ext == '.tar':
+                cert_content, key_content = _deal_with_tar(src_cert)
+            else:
+                cert_content, key_content = _deal_with_plain(src_cert)
 
             try:
-                src_x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, src_content)
+                src_x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, cert_content)
             except:
-                src_x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, src_content)
+                src_x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, cert_content)
             src_x509start_date = datetime.strptime(src_x509.get_notBefore().decode('ascii'), '%Y%m%d%H%M%SZ')
 
-            dest_cert = self._connection._shell.join_path(dest_cert);
-            dest_cert = self._remote_expand_user(dest_cert);
-            dest_key = dest_cert.replace('.cer', '.key')
+            dest_cert = self._connection._shell.join_path(dest_cert, 'cert.pem')
+            dest_cert = self._remote_expand_user(dest_cert)
+            dest_key = dest_cert + '.key'
 
             # use slurp if permissions are lacking or privileges escalation is needed
             dest_content = None
@@ -130,8 +186,8 @@ class ActionModule(ActionBase):
                 dest_x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, dest_content)
                 dest_x509start_date = datetime.strptime(dest_x509.get_notBefore().decode('ascii'), '%Y%m%d%H%M%SZ')
 
-#            result['remote_exp_date'] = dest_x509exp_date.isoformat()
-#            result['local_exp_date'] = src_x509exp_date.isoformat()
+            #            result['remote_exp_date'] = dest_x509exp_date.isoformat()
+            #            result['local_exp_date'] = src_x509exp_date.isoformat()
 
             if (src_x509start_date > dest_x509start_date) or force:
                 local_tempdir = tempfile.mkdtemp(dir=C.DEFAULT_LOCAL_TMP)
@@ -139,7 +195,12 @@ class ActionModule(ActionBase):
                 try:
                     result_cert = os.path.join(local_tempdir, os.path.basename('cert.pem'))
                     with open(to_bytes(result_cert, errors='surrogate_or_strict'), 'wb') as f:
-                        f.write(OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, src_x509))
+                        f.write(to_bytes(cert_content, errors='surrogate_or_strict'))
+                        # f.write(OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, src_x509))
+
+                    result_key = os.path.join(local_tempdir, os.path.basename('privkey.pem'))
+                    with open(to_bytes(result_key, errors='surrogate_or_strict'), 'wb') as f:
+                        f.write(to_bytes(key_content, errors='surrogate_or_strict'))
 
                     new_cert_task = self._task.copy()
                     new_cert_task.args.update(
@@ -150,12 +211,12 @@ class ActionModule(ActionBase):
                     )
                     # copy cert
                     copy_cert_action = self._shared_loader_obj.action_loader.get('copy',
-                                                                            task=new_cert_task,
-                                                                            connection=self._connection,
-                                                                            play_context=self._play_context,
-                                                                            loader=self._loader,
-                                                                            templar=self._templar,
-                                                                            shared_loader_obj=self._shared_loader_obj)
+                                                                                 task=new_cert_task,
+                                                                                 connection=self._connection,
+                                                                                 play_context=self._play_context,
+                                                                                 loader=self._loader,
+                                                                                 templar=self._templar,
+                                                                                 shared_loader_obj=self._shared_loader_obj)
 
                     result.update({'cert_result': copy_cert_action.run(task_vars=task_vars)})
 
@@ -163,18 +224,18 @@ class ActionModule(ActionBase):
                     new_key_task = self._task.copy()
                     new_key_task.args.update(
                         dict(
-                            src=src_key,
+                            src=result_key,
                             dest=dest_key,
                             force=True
                         ),
                     )
                     copy_key_action = self._shared_loader_obj.action_loader.get('copy',
-                                                                            task=new_key_task,
-                                                                            connection=self._connection,
-                                                                            play_context=self._play_context,
-                                                                            loader=self._loader,
-                                                                            templar=self._templar,
-                                                                            shared_loader_obj=self._shared_loader_obj)
+                                                                                task=new_key_task,
+                                                                                connection=self._connection,
+                                                                                play_context=self._play_context,
+                                                                                loader=self._loader,
+                                                                                templar=self._templar,
+                                                                                shared_loader_obj=self._shared_loader_obj)
 
                     result.update({'key_result': copy_key_action.run(task_vars=task_vars)})
 
