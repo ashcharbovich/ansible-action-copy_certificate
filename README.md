@@ -15,3 +15,27 @@ Public key has to be placed near the copying certificate.
 
 * python >= 3.9
 * pyopenssl >= 22.1.0
+
+## Examples
+
+```
+- name: Copy certificate and private key with owner and permissions
+  copy_certificate:
+    src: /srv/myfiles/foo.cer
+    dest: /etc/
+    owner: foo
+    group: foo
+    mode: 0644
+    force: yes
+```
+
+```
+- name: Extract certificate and private key from archive and copy with owner and permissions
+  copy_certificate:
+    src: /srv/myfiles/foo.tar
+    dest: /etc/
+    owner: foo
+    group: foo
+    mode: 0644
+    force: yes
+```
