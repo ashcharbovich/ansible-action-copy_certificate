@@ -64,7 +64,7 @@ from datetime import datetime
 import tarfile
 import tempfile
 import base64
-import OpenSSL
+from cryptography import x509
 
 from ansible import constants as C
 from ansible.errors import AnsibleError, AnsibleActionFail
@@ -141,7 +141,6 @@ class ActionModule(ActionBase):
 
         src_cert = self._connection._shell.join_path(src_cert)
         src_ext = os.path.splitext(src_cert)[1]
-        # src_key = src_cert.replace('.cer', '.key')
 
         try:
             if src_cert is None or dest_cert is None:
@@ -156,10 +155,10 @@ class ActionModule(ActionBase):
                 cert_content, key_content = _deal_with_plain(src_cert)
 
             try:
-                src_x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, cert_content)
-            except:
-                src_x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, cert_content)
-            src_x509start_date = datetime.strptime(src_x509.get_notBefore().decode('ascii'), '%Y%m%d%H%M%SZ')
+                src_x509 = x509.load_pem_x509_certificate(cert_content)
+            except ValueError as e:
+                src_x509 = x509.load_der_x509_certificate(cert_content)
+            src_x509start_date = src_x509.not_valid_before
 
             dest_cert = self._connection._shell.join_path(dest_cert, 'cert.pem')
             dest_cert = self._remote_expand_user(dest_cert)
@@ -171,7 +170,7 @@ class ActionModule(ActionBase):
             if slurpres.get('failed'):
                 if slurpres.get('msg').startswith('file not found'):
                     force = True
-                    dest_x509start_date = datetime.now()
+                    dest_x509start_date = datetime(1970, 1, 1)
                 else:
                     result.update(slurpres)
                     return result
@@ -183,11 +182,12 @@ class ActionModule(ActionBase):
                 if dest_source and dest_source != dest_cert:
                     dest_cert = dest_source
 
-                dest_x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, dest_content)
-                dest_x509start_date = datetime.strptime(dest_x509.get_notBefore().decode('ascii'), '%Y%m%d%H%M%SZ')
+                dest_x509 = x509.load_pem_x509_certificate(dest_content)
+                dest_x509start_date = dest_x509.not_valid_before
 
-            #            result['remote_exp_date'] = dest_x509exp_date.isoformat()
-            #            result['local_exp_date'] = src_x509exp_date.isoformat()
+            # result['remote_issue_date'] = dest_x509start_date
+            # result['local_issue_date'] = src_x509start_date
+            # result['force'] = force
 
             if (src_x509start_date > dest_x509start_date) or force:
                 local_tempdir = tempfile.mkdtemp(dir=C.DEFAULT_LOCAL_TMP)
