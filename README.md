@@ -14,7 +14,7 @@ Public key has to be placed near the copying certificate.
 ## Requirements
 
 * python >= 3.9
-* pyopenssl >= 22.1.0
+* cryptography >= 38.0.4
 
 ## Examples
 
